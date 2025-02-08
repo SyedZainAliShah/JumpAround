@@ -109,6 +109,10 @@ class Game extends KeyAdapter {
     Shader shader;
     ArrayList<GameObject> gameObjects = new ArrayList<>();
 
+    int currentShaderEffect = 0;
+    String[] effectNames = { "Original PBR", "Paint Mix Shading", "Pixelation Effect" };
+    boolean recompileShadersNeeded = false;
+
     public Game() {
         ball = new Ball();
         playerOne = new Player(-1.8f, 0f, -90);
@@ -169,8 +173,7 @@ class Game extends KeyAdapter {
         powerUp.vertBufIDs[0] = vboLoader.vertBufID;
         powerUp.vertNos[0] = vboLoader.vertNo;
 
-        shader.setupShaders(d);
-
+        shader.setupShaders(d, 0); // Initialize with original shader
         court.texID = TextureLoader.loadTexture(d, "src/interstellar.png");
         int texId = TextureLoader.loadTexture(d, "src/white.png");
         ball.texID = texId;
@@ -187,6 +190,16 @@ class Game extends KeyAdapter {
     public void display(GLAutoDrawable d) {
         GL3 gl = d.getGL().getGL3();
 
+
+        int timeLocation = gl.glGetUniformLocation(shader.progID, "uTime");
+        long startTime = System.nanoTime();
+        float currentTime = (System.nanoTime() - startTime) / 1e9f;
+
+        if (recompileShadersNeeded) {
+            shader.setupShaders(d, currentShaderEffect);
+            recompileShadersNeeded = false;
+        }
+
         gl.glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
         gl.glClear(GL.GL_COLOR_BUFFER_BIT | GL.GL_DEPTH_BUFFER_BIT);
 
@@ -195,6 +208,9 @@ class Game extends KeyAdapter {
         gl.glUniform3f(shader.lightDirectionLoc, lightDirection[0], lightDirection[1], lightDirection[2]);
         gl.glUniform1f(shader.metallicLoc, metallic);
         gl.glUniform1f(shader.roughnessLoc, roughness);
+
+
+        gl.glUniform1f(timeLocation, currentTime);
 
         for (GameObject gameObject : gameObjects) {
             renderGameObject(gl, gameObject);
@@ -469,6 +485,11 @@ class Game extends KeyAdapter {
                 break;
             case KeyEvent.VK_8:
                 roughness = 0.2f;
+                break;
+            case KeyEvent.VK_9:
+                currentShaderEffect = (currentShaderEffect + 1) % effectNames.length;
+                System.out.println("Shader effect: " + effectNames[currentShaderEffect]);
+                recompileShadersNeeded = true;
                 break;
         }
     }
@@ -827,43 +848,12 @@ class Shader {
     int roughnessLoc = 0;
     int isShadowLoc = 0;
 
-    public void setupShaders(GLAutoDrawable d) {
-        GL3 gl = d.getGL().getGL3();
 
-        int textVertID = gl.glCreateShader(GL3.GL_VERTEX_SHADER);
-        int textFragID = gl.glCreateShader(GL3.GL_FRAGMENT_SHADER);
+    private String[] fragmentShaders = new String[3];
 
-        String[] vs = new String[]{
-                """
-                #version 140
-
-                in vec3 inputPosition;
-                in vec4 inputColor;
-                in vec2 inputTexCoord;
-                in vec3 inputNormal;
-
-                uniform mat4 projection;
-                uniform mat4 modelview;
-                uniform mat4 normalMat;
-
-                out vec3 forFragColor;
-                out vec2 forFragTexCoord;
-                out vec3 normal;
-                out vec3 vertPos;
-
-                void main(){
-                    forFragColor = inputColor.rgb;
-                    forFragTexCoord = inputTexCoord;
-                    normal = (normalMat * vec4(inputNormal, 0.0)).xyz;
-                    vec4 vertPos4 = modelview * vec4(inputPosition, 1.0);
-                    vertPos = vec3(vertPos4) / vertPos4.w;
-                    gl_Position =  projection * modelview * vec4(inputPosition, 1.0);
-                }
-                """
-        };
-
-        String[] fs = new String[]{
-                """
+    public Shader() {
+        // Original PBR Shader
+        fragmentShaders[0] = """
                 #version 140
                 out vec4 outputColor;
 
@@ -903,7 +893,7 @@ class Shader {
                   return max(NoV, 0.001) / (NoV * (1.0 - k) + k);
                 }
 
-                        float G_Smith(float NoV, float NoL, float roughness) {
+                float G_Smith(float NoV, float NoL, float roughness) {
                   return G1_GGX_Schlick(NoL, roughness) * G1_GGX_Schlick(NoV, roughness);
                 }
 
@@ -933,7 +923,7 @@ class Shader {
 
                 void main() {
                     if (isShadow == 1) {
-                        outputColor = vec4(0.0, 0.0, 0.0, 1.0); // Draw shadow in black
+                        outputColor = vec4(0.0, 0.0, 0.0, 1.0);
                         return;
                     }
 
@@ -943,7 +933,7 @@ class Shader {
 
                     vec3 textureColor = texture(myTexture, forFragTexCoord).rgb;
                     vec3 baseColor = forFragColor * textureColor;
-                    baseColor = pow(baseColor, vec3(2.2)); // Gamma correction
+                    baseColor = pow(baseColor, vec3(2.2));
 
                     vec3 radiance = ambientLight * baseColor;
                     float irradiance = max(dot(lightDir, n), 0.0) * irradiPerp;
@@ -952,11 +942,89 @@ class Shader {
                         radiance += brdf * irradiance * lightColor.rgb;
                     }
 
-                    radiance = pow(radiance, vec3(1.0 / 2.2)); // Gamma correction
+                    radiance = pow(radiance, vec3(1.0 / 2.2));
                     outputColor = vec4(radiance, 1.0);
+                }
+                """;
+
+        // Paint Mix
+        fragmentShaders[1] = """
+            #version 140
+            uniform float uTime;
+            uniform sampler2D myTexture;
+            in vec2 forFragTexCoord;
+            out vec4 outputColor;
+
+            void main() {
+                vec2 uv = forFragTexCoord;
+                float frequency = 30.0;
+                float amplitude = 1.0;
+                uv.x += sin(uv.y * frequency + uTime) * amplitude;
+                uv.y += cos(uv.x * frequency + uTime) * amplitude;
+                vec3 texColor = texture(myTexture, uv).rgb;
+                vec3 waterTint = vec3(0.8, 0.2, 0.9);
+                vec3 color = mix(texColor, waterTint, 0.3);
+                outputColor = vec4(color, 1.0);
+            }
+            """;
+
+        // New Pixelation Shader
+        fragmentShaders[2] = """
+            #version 140
+            uniform sampler2D myTexture;
+            in vec2 forFragTexCoord;
+            out vec4 outputColor;
+
+            void main() {
+                float pixelSize = 128.0;
+                vec2 uv = floor(forFragTexCoord * pixelSize) / pixelSize;
+                vec3 color = texture(myTexture, uv).rgb;
+                outputColor = vec4(color, 1.0);
+            }
+            """;
+    }
+
+    public void setupShaders(GLAutoDrawable d, int effectIndex) {
+        GL3 gl = d.getGL().getGL3();
+
+        if (progID != 0) {
+            gl.glDeleteProgram(progID);
+            progID = 0;
+        }
+
+        int textVertID = gl.glCreateShader(GL3.GL_VERTEX_SHADER);
+        int textFragID = gl.glCreateShader(GL3.GL_FRAGMENT_SHADER);
+
+        String[] vs = new String[]{
+                """
+                #version 140
+
+                in vec3 inputPosition;
+                in vec4 inputColor;
+                in vec2 inputTexCoord;
+                in vec3 inputNormal;
+
+                uniform mat4 projection;
+                uniform mat4 modelview;
+                uniform mat4 normalMat;
+
+                out vec3 forFragColor;
+                out vec2 forFragTexCoord;
+                out vec3 normal;
+                out vec3 vertPos;
+
+                void main(){
+                    forFragColor = inputColor.rgb;
+                    forFragTexCoord = inputTexCoord;
+                    normal = (normalMat * vec4(inputNormal, 0.0)).xyz;
+                    vec4 vertPos4 = modelview * vec4(inputPosition, 1.0);
+                    vertPos = vec3(vertPos4) / vertPos4.w;
+                    gl_Position =  projection * modelview * vec4(inputPosition, 1.0);
                 }
                 """
         };
+
+        String[] fs = new String[]{fragmentShaders[effectIndex]};
 
         gl.glShaderSource(textVertID, 1, vs, null, 0);
         gl.glShaderSource(textFragID, 1, fs, null, 0);
